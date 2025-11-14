@@ -78,6 +78,19 @@ class VLLMOptimizer:
             return False, e.stderr
         except Exception as e:
             return False, str(e)
+
+    def get_gpu_count(self) -> int:
+        """Get number of NVIDIA GPUs"""
+        result = subprocess.run(['nvidia-smi', '-L'], capture_output=True, text=True)
+        return len([l for l in result.stdout.split('\n') if l.startswith('GPU')])
+
+    def validate_gpu_id(self, gpu_id: int) -> bool:
+        """Validate that GPU ID exists"""
+        gpu_count = self.get_gpu_count()
+        if gpu_id < 0 or gpu_id >= gpu_count:
+            print(f"✗ Invalid GPU ID: {gpu_id}. Valid range is 0-{gpu_count - 1}")
+            return False
+        return True
     
     def get_gpu_info(self, gpu_id: int = 0) -> Dict:
         """Get GPU information"""
@@ -182,7 +195,10 @@ class VLLMOptimizer:
         """Apply vLLM optimization profile to GPU"""
         if profile not in self.profiles:
             return {'success': False, 'message': f"Unknown profile: {profile}"}
-        
+
+        if not self.validate_gpu_id(gpu_id):
+            return {'success': False, 'message': f"Invalid GPU ID: {gpu_id}"}
+
         profile_data = self.profiles[profile]
         gpu_info = self.get_gpu_info(gpu_id)
         
@@ -223,7 +239,8 @@ class VLLMOptimizer:
         # 4. Set auto boost
         if profile_data.get('auto_boost') is not None:
             mode = '1' if profile_data['auto_boost'] else '0'
-            cmd = ['sudo', 'nvidia-smi', '-i', str(gpu_id), '--auto-boost-default=' + mode]
+            # Use correct flag for auto boost
+            cmd = ['sudo', 'nvidia-smi', '-i', str(gpu_id), '--auto-boost-permission=' + mode]
             success, output = self.run_command(cmd, check=False)  # May not be supported
             if success:
                 status = "✓"
@@ -237,11 +254,8 @@ class VLLMOptimizer:
             if success:
                 results.append(f"✓ Application clocks: {mem_clock}MHz mem, {graphics_clock}MHz graphics")
             else:
-                # Try locking clocks instead
-                cmd = ['sudo', 'nvidia-smi', '-i', str(gpu_id), '-lgc', str(graphics_clock)]
-                success, output = self.run_command(cmd, check=False)
-                if success:
-                    results.append(f"✓ Locked graphics clock: {graphics_clock}MHz")
+                # Application clocks not supported on this GPU
+                results.append(f"⚠ Application clocks not supported on this GPU")
         
         # 6. Set ECC if specified
         if 'ecc' in profile_data:
@@ -353,9 +367,13 @@ class VLLMOptimizer:
     
     def show_current_status(self, gpu_id: int = 0):
         """Show current GPU status and vLLM readiness"""
+        if not self.validate_gpu_id(gpu_id):
+            input("\nPress Enter to continue...")
+            return
+
         print("\nCurrent GPU Status:")
         print("=" * 60)
-        
+
         gpu_info = self.get_gpu_info(gpu_id)
         
         print(f"GPU Model: {gpu_info.get('model', 'Unknown')}")
@@ -400,8 +418,12 @@ class VLLMOptimizer:
     
     def reset_to_defaults(self, gpu_id: int):
         """Reset GPU to default settings"""
+        if not self.validate_gpu_id(gpu_id):
+            input("\nPress Enter to continue...")
+            return
+
         print(f"\nResetting GPU {gpu_id} to defaults...")
-        
+
         results = []
         
         # Reset clocks
@@ -416,11 +438,19 @@ class VLLMOptimizer:
         if success:
             results.append("✓ Graphics clocks unlocked")
         
-        # Reset power limit
-        cmd = ['sudo', 'nvidia-smi', '-i', str(gpu_id), '-pl', '0']
-        success, _ = self.run_command(cmd, check=False)
-        if success:
-            results.append("✓ Power limit reset")
+        # Reset power limit to default
+        # Query default power limit first
+        query_cmd = ['nvidia-smi', '-i', str(gpu_id), '--query-gpu=power.default_limit', '--format=csv,noheader,nounits']
+        success, output = self.run_command(query_cmd, check=False)
+        if success and output.strip():
+            try:
+                default_power = int(float(output.strip()))
+                cmd = ['sudo', 'nvidia-smi', '-i', str(gpu_id), '-pl', str(default_power)]
+                success, _ = self.run_command(cmd, check=False)
+                if success:
+                    results.append(f"✓ Power limit reset to default ({default_power}W)")
+            except:
+                results.append("⚠ Could not reset power limit")
         
         # Set persistence mode off
         cmd = ['sudo', 'nvidia-smi', '-i', str(gpu_id), '-pm', '0']

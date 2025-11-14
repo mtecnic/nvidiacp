@@ -50,6 +50,38 @@ class NvidiaGPUController:
         if success:
             return len([line for line in output.split('\n') if line.startswith('GPU')])
         return 0
+
+    def get_driver_info(self) -> Tuple[str, str]:
+        """Get NVIDIA driver and CUDA versions"""
+        driver_version = "Unknown"
+        cuda_version = "Unknown"
+
+        success, output = self.run_command(['nvidia-smi', '--query-gpu=driver_version', '--format=csv,noheader'])
+        if success and output.strip():
+            driver_version = output.strip().split('\n')[0].strip()
+
+        success, output = self.run_command(['nvidia-smi', '--query-gpu=cuda_version', '--format=csv,noheader'], check=False)
+        if success and output.strip():
+            cuda_version = output.strip().split('\n')[0].strip()
+        else:
+            # Fallback: try to get CUDA version from nvidia-smi output
+            success, output = self.run_command(['nvidia-smi'], check=False)
+            if success:
+                for line in output.split('\n'):
+                    if 'CUDA Version:' in line:
+                        try:
+                            cuda_version = line.split('CUDA Version:')[1].strip().split()[0]
+                        except:
+                            pass
+
+        return driver_version, cuda_version
+
+    def validate_gpu_id(self, gpu_id: int) -> bool:
+        """Validate that GPU ID exists"""
+        if gpu_id < 0 or gpu_id >= self.gpu_count:
+            print(f"✗ Invalid GPU ID: {gpu_id}. Valid range is 0-{self.gpu_count - 1}")
+            return False
+        return True
     
     def get_gpu_info(self) -> str:
         """Get current GPU information"""
@@ -152,14 +184,15 @@ class NvidiaGPUController:
     def set_auto_boost(self, gpu_id: int, enabled: bool):
         """Enable/Disable GPU auto boost"""
         mode = '1' if enabled else '0'
-        cmd = ['sudo', 'nvidia-smi', '-i', str(gpu_id), '--auto-boost-default=' + mode]
+        # Try the correct flag first
+        cmd = ['sudo', 'nvidia-smi', '-i', str(gpu_id), '--auto-boost-permission=' + mode]
         success, output = self.run_command(cmd, check=False)
         if success:
             self.settings[f'gpu_{gpu_id}_auto_boost'] = enabled
             self.save_settings()
             print(f"✓ Auto boost {'enabled' if enabled else 'disabled'} for GPU {gpu_id}")
         else:
-            print(f"✗ Failed to set auto boost (may not be supported): {output}")
+            print(f"✗ Failed to set auto boost (may not be supported on this GPU): {output}")
         input("\nPress Enter to continue...")
     
     def set_application_clocks(self, gpu_id: int, mem_clock: int, graphics_clock: int):
@@ -277,14 +310,20 @@ class NvidiaGPUController:
     
     def set_gom_mode(self, gpu_id: int, mode: str):
         """Set GPU Operation Mode (all-on, compute, low-dp)"""
-        cmd = ['sudo', 'nvidia-smi', '-i', str(gpu_id), '--gom', mode]
-        success, output = self.run_command(cmd)
+        # Try modern flag first
+        cmd = ['sudo', 'nvidia-smi', '-i', str(gpu_id), '--gpu-operation-mode=' + mode]
+        success, output = self.run_command(cmd, check=False)
+        if not success:
+            # Fall back to deprecated flag for older nvidia-smi versions
+            cmd = ['sudo', 'nvidia-smi', '-i', str(gpu_id), '--gom=' + mode]
+            success, output = self.run_command(cmd, check=False)
+
         if success:
             self.settings[f'gpu_{gpu_id}_gom'] = mode
             self.save_settings()
             print(f"✓ GOM mode set to {mode} for GPU {gpu_id}")
         else:
-            print(f"✗ Failed to set GOM mode: {output}")
+            print(f"✗ Failed to set GOM mode (may not be supported on this GPU): {output}")
         input("\nPress Enter to continue...")
     
     def apply_all_settings(self):
@@ -338,8 +377,13 @@ class NvidiaGPUController:
                         success, _ = self.run_command(cmd, check=False)
                         if success: applied_count += 1
                     elif setting_type == 'gom':
-                        cmd = ['sudo', 'nvidia-smi', '-i', str(gpu_id), '--gom', str(value)]
+                        # Try modern flag first
+                        cmd = ['sudo', 'nvidia-smi', '-i', str(gpu_id), '--gpu-operation-mode=' + str(value)]
                         success, _ = self.run_command(cmd, check=False)
+                        if not success:
+                            # Fall back to deprecated flag
+                            cmd = ['sudo', 'nvidia-smi', '-i', str(gpu_id), '--gom=' + str(value)]
+                            success, _ = self.run_command(cmd, check=False)
                         if success: applied_count += 1
                 except Exception as e:
                     print(f"Failed to apply {key}: {e}")
@@ -355,11 +399,18 @@ class NvidiaGPUController:
         for gpu_id in range(self.gpu_count):
             # Reset clocks
             subprocess.run(['sudo', 'nvidia-smi', '-i', str(gpu_id), '-rac'], capture_output=True)
-            # Reset power limit
-            subprocess.run(['sudo', 'nvidia-smi', '-i', str(gpu_id), '-pl', '0'], capture_output=True)
+            # Reset power limit to default (query default limit first)
+            cmd = ['nvidia-smi', '-i', str(gpu_id), '--query-gpu=power.default_limit', '--format=csv,noheader,nounits']
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            if result.returncode == 0 and result.stdout.strip():
+                try:
+                    default_power = int(float(result.stdout.strip()))
+                    subprocess.run(['sudo', 'nvidia-smi', '-i', str(gpu_id), '-pl', str(default_power)], capture_output=True)
+                except:
+                    pass  # If can't parse, skip power reset
             # Set persistence mode off
             subprocess.run(['sudo', 'nvidia-smi', '-i', str(gpu_id), '-pm', '0'], capture_output=True)
-        
+
         # Clear settings
         self.settings = {}
         self.save_settings()
@@ -404,9 +455,10 @@ class NvidiaGPUController:
         """Display main menu"""
         while True:
             os.system('clear')
+            driver_ver, cuda_ver = self.get_driver_info()
             print("=" * 60)
             print("NVIDIA GPU Control Panel".center(60))
-            print(f"Driver: 570.133.07 | CUDA: 12.8".center(60))
+            print(f"Driver: {driver_ver} | CUDA: {cuda_ver}".center(60))
             print("=" * 60)
             print("\n=== Information & Monitoring ===")
             print("1. Show GPU Information")

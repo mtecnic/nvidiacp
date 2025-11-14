@@ -3,8 +3,8 @@
 ## Quick Start (Recommended)
 
 ```bash
-# 1. Go to the nvidiacp folder
-cd /home/waive/nvidiacp
+# 1. Clone or download the repository and navigate to it
+cd nvidiacp
 
 # 2. Run the installer (requires sudo)
 sudo ./install.sh
@@ -22,12 +22,15 @@ That's it! The program is now installed system-wide and ready to use.
 If you prefer not to use the installer:
 
 ```bash
-# 1. Make scripts executable
-chmod +x /home/waive/nvidiacp/nvidia_control.py
-chmod +x /home/waive/nvidiacp/vllm_optimizer.py
+# 1. Navigate to the nvidiacp directory
+cd nvidiacp
 
-# 2. Run directly
-sudo python3 /home/waive/nvidiacp/nvidia_control.py
+# 2. Make scripts executable
+chmod +x nvidia_control.py
+chmod +x vllm_optimizer.py
+
+# 3. Run directly
+sudo python3 ./nvidia_control.py
 ```
 
 ---
@@ -37,18 +40,19 @@ sudo python3 /home/waive/nvidiacp/nvidia_control.py
 ### Main Control Panel
 ```bash
 sudo nvidiacp
-# or
-sudo python3 /home/waive/nvidiacp/nvidia_control.py
+# or (if not installed system-wide)
+sudo python3 ./nvidia_control.py
 ```
 
 ### vLLM Optimizer (Standalone)
 ```bash
-sudo python3 /home/waive/nvidiacp/vllm_optimizer.py
+# Access via main menu (option 23) or run directly:
+sudo python3 ./vllm_optimizer.py
 ```
 
 ### Apply Saved Settings (Used by boot service)
 ```bash
-python3 /home/waive/nvidiacp/nvidia_control.py --apply-settings
+nvidiacp --apply-settings
 ```
 
 ---
@@ -177,7 +181,8 @@ sudo systemctl enable nvidia-settings-persistence.service
 ## Uninstallation
 
 ```bash
-cd /home/waive/nvidiacp
+# Navigate to the nvidiacp directory
+cd nvidiacp
 sudo ./uninstall.sh
 ```
 
@@ -213,9 +218,9 @@ sudo systemctl status nvidia-settings-persistence.service
 ```
 
 ### vLLM Optimizer Not Found
-Make sure you're in the right directory:
+Make sure vllm_optimizer.py is in the same directory as nvidia_control.py:
 ```bash
-ls -la /home/waive/nvidiacp/vllm_optimizer.py
+ls -la vllm_optimizer.py
 ```
 
 ### Fan Control Not Working
@@ -226,18 +231,18 @@ Fan control requires X11 and coolbits configuration. This is optional and mainly
 ## File Locations
 
 ### Program Files:
-- `/home/waive/nvidiacp/nvidia_control.py` - Main application
-- `/home/waive/nvidiacp/vllm_optimizer.py` - vLLM optimizer  
-- `/home/waive/nvidiacp/install.sh` - Installer
-- `/home/waive/nvidiacp/uninstall.sh` - Uninstaller
+- `nvidia_control.py` - Main application
+- `vllm_optimizer.py` - vLLM optimizer
+- `install.sh` - Installer script
+- `uninstall.sh` - Uninstaller script
 
-### Configuration:
+### Configuration Files:
 - `~/.config/nvidiacp/settings.json` - Your saved GPU settings
 - `~/.config/nvidiacp/vllm_settings.json` - vLLM optimizer settings
 
 ### System Files (Created by installer):
-- `/usr/local/bin/nvidiacp` - System command (symlink)
-- `/etc/systemd/system/nvidia-settings-persistence.service` - Boot service
+- `/usr/local/bin/nvidiacp` - System-wide command (symlink to nvidia_control.py)
+- `/etc/systemd/system/nvidia-settings-persistence.service` - Boot persistence service
 
 ---
 
