@@ -1,0 +1,19 @@
+[Unit]
+Description=NVIDIA GPU Settings Persistence
+After=multi-user.target nvidia-persistenced.service
+Wants=nvidia-persistenced.service
+ConditionPathExists=/usr/bin/nvidia-smi
+
+[Service]
+Type=oneshot
+User=root
+Environment="PATH=/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin"
+ExecStartPre=/bin/sleep 5
+ExecStart=/usr/bin/python3 /home/waive/nvidiacp/nvidia_control.py --apply-settings
+RemainAfterExit=yes
+StandardOutput=journal
+StandardError=journal
+TimeoutStartSec=60
+
+[Install]
+WantedBy=multi-user.target
