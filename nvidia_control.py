@@ -56,30 +56,29 @@ class NvidiaGPUController:
         driver_version = "Unknown"
         cuda_version = "Unknown"
 
+        # Query driver version (valid field)
         success, output = self.run_command(['nvidia-smi', '--query-gpu=driver_version', '--format=csv,noheader'])
         if success and output.strip():
             driver_version = output.strip().split('\n')[0].strip()
 
-        success, output = self.run_command(['nvidia-smi', '--query-gpu=cuda_version', '--format=csv,noheader'], check=False)
-        if success and output.strip():
-            cuda_version = output.strip().split('\n')[0].strip()
-        else:
-            # Fallback: try to get CUDA version from nvidia-smi output
-            success, output = self.run_command(['nvidia-smi'], check=False)
-            if success:
-                for line in output.split('\n'):
-                    if 'CUDA Version:' in line:
-                        try:
-                            cuda_version = line.split('CUDA Version:')[1].strip().split()[0]
-                        except:
-                            pass
+        # CUDA version must be parsed from nvidia-smi output
+        # (cuda_version is NOT a valid --query-gpu field)
+        success, output = self.run_command(['nvidia-smi'], check=False)
+        if success:
+            for line in output.split('\n'):
+                if 'CUDA Version:' in line:
+                    try:
+                        cuda_version = line.split('CUDA Version:')[1].strip().split()[0]
+                    except:
+                        cuda_version = "Unknown"
 
         return driver_version, cuda_version
 
     def validate_gpu_id(self, gpu_id: int) -> bool:
-        """Validate that GPU ID exists"""
-        if gpu_id < 0 or gpu_id >= self.gpu_count:
-            print(f"✗ Invalid GPU ID: {gpu_id}. Valid range is 0-{self.gpu_count - 1}")
+        """Validate that GPU ID exists (re-checks GPU count for hot-plug detection)"""
+        current_count = self.get_gpu_count()  # Re-check for GPU changes
+        if gpu_id < 0 or gpu_id >= current_count:
+            print(f"✗ Invalid GPU ID: {gpu_id}. Valid range is 0-{current_count - 1}")
             return False
         return True
     
@@ -90,6 +89,10 @@ class NvidiaGPUController:
     
     def set_persistence_mode(self, gpu_id: int, enabled: bool):
         """Enable/Disable persistence mode"""
+        if not self.validate_gpu_id(gpu_id):
+            input("\nPress Enter to continue...")
+            return
+
         mode = '1' if enabled else '0'
         cmd = ['sudo', 'nvidia-smi', '-i', str(gpu_id), '-pm', mode]
         success, output = self.run_command(cmd)
@@ -103,6 +106,27 @@ class NvidiaGPUController:
     
     def set_power_limit(self, gpu_id: int, watts: int):
         """Set power limit for GPU"""
+        if not self.validate_gpu_id(gpu_id):
+            input("\nPress Enter to continue...")
+            return
+
+        # Validate power limit range
+        cmd = ['nvidia-smi', '-i', str(gpu_id),
+               '--query-gpu=power.min_limit,power.max_limit',
+               '--format=csv,noheader,nounits']
+        success, output = self.run_command(cmd, check=False)
+        if success and output.strip():
+            try:
+                parts = output.strip().split(', ')
+                if len(parts) >= 2:
+                    min_w, max_w = float(parts[0]), float(parts[1])
+                    if not (min_w <= watts <= max_w):
+                        print(f"✗ Power limit must be between {min_w:.0f}W and {max_w:.0f}W")
+                        input("\nPress Enter to continue...")
+                        return
+            except:
+                pass  # If query fails, let nvidia-smi validate
+
         cmd = ['sudo', 'nvidia-smi', '-i', str(gpu_id), '-pl', str(watts)]
         success, output = self.run_command(cmd)
         if success:
@@ -115,21 +139,32 @@ class NvidiaGPUController:
     
     def set_gpu_clocks(self, gpu_id: int, mem_clock: Optional[int] = None, graphics_clock: Optional[int] = None):
         """Set GPU memory and graphics clocks"""
-        if mem_clock is not None:
-            cmd = ['sudo', 'nvidia-smi', '-i', str(gpu_id), '-ac', f'{mem_clock},{graphics_clock if graphics_clock else 0}']
-            success, output = self.run_command(cmd)
-            if success:
-                self.settings[f'gpu_{gpu_id}_mem_clock'] = mem_clock
-                if graphics_clock:
-                    self.settings[f'gpu_{gpu_id}_graphics_clock'] = graphics_clock
-                self.save_settings()
-                print(f"✓ Clocks set for GPU {gpu_id}")
-            else:
-                print(f"✗ Failed to set clocks: {output}")
+        if not self.validate_gpu_id(gpu_id):
+            input("\nPress Enter to continue...")
+            return
+
+        if mem_clock is None or graphics_clock is None:
+            print("✗ Both memory and graphics clocks are required for -ac command")
+            input("\nPress Enter to continue...")
+            return
+
+        cmd = ['sudo', 'nvidia-smi', '-i', str(gpu_id), '-ac', f'{mem_clock},{graphics_clock}']
+        success, output = self.run_command(cmd)
+        if success:
+            self.settings[f'gpu_{gpu_id}_mem_clock'] = mem_clock
+            self.settings[f'gpu_{gpu_id}_graphics_clock'] = graphics_clock
+            self.save_settings()
+            print(f"✓ Clocks set for GPU {gpu_id}")
+        else:
+            print(f"✗ Failed to set clocks: {output}")
         input("\nPress Enter to continue...")
     
     def reset_gpu_clocks(self, gpu_id: int):
         """Reset GPU clocks to default"""
+        if not self.validate_gpu_id(gpu_id):
+            input("\nPress Enter to continue...")
+            return
+
         cmd = ['sudo', 'nvidia-smi', '-i', str(gpu_id), '-rac']
         success, output = self.run_command(cmd)
         if success:
@@ -144,6 +179,10 @@ class NvidiaGPUController:
     
     def set_compute_mode(self, gpu_id: int, mode: int):
         """Set compute mode (0=Default, 1=Exclusive Thread, 2=Prohibited, 3=Exclusive Process)"""
+        if not self.validate_gpu_id(gpu_id):
+            input("\nPress Enter to continue...")
+            return
+
         cmd = ['sudo', 'nvidia-smi', '-i', str(gpu_id), '-c', str(mode)]
         success, output = self.run_command(cmd)
         if success:
@@ -157,6 +196,10 @@ class NvidiaGPUController:
     
     def set_fan_speed(self, gpu_id: int, speed: int):
         """Set fan speed (requires coolbits enabled in X11)"""
+        if not self.validate_gpu_id(gpu_id):
+            input("\nPress Enter to continue...")
+            return
+
         # Note: This requires X11 and coolbits configuration
         cmd = ['nvidia-settings', '-a', f'[gpu:{gpu_id}]/GPUFanControlState=1', '-a', f'[fan:{gpu_id}]/GPUTargetFanSpeed={speed}']
         success, output = self.run_command(cmd)
@@ -170,6 +213,10 @@ class NvidiaGPUController:
     
     def enable_ecc(self, gpu_id: int, enabled: bool):
         """Enable/Disable ECC memory (requires reboot)"""
+        if not self.validate_gpu_id(gpu_id):
+            input("\nPress Enter to continue...")
+            return
+
         mode = '1' if enabled else '0'
         cmd = ['sudo', 'nvidia-smi', '-i', str(gpu_id), '-e', mode]
         success, output = self.run_command(cmd)
@@ -183,20 +230,31 @@ class NvidiaGPUController:
     
     def set_auto_boost(self, gpu_id: int, enabled: bool):
         """Enable/Disable GPU auto boost"""
+        if not self.validate_gpu_id(gpu_id):
+            input("\nPress Enter to continue...")
+            return
+
         mode = '1' if enabled else '0'
-        # Try the correct flag first
-        cmd = ['sudo', 'nvidia-smi', '-i', str(gpu_id), '--auto-boost-permission=' + mode]
+        # NOTE: --auto-boost-default is deprecated by NVIDIA and may not work on modern GPUs
+        # It controls whether auto-boost is enabled, not permissions
+        cmd = ['sudo', 'nvidia-smi', '-i', str(gpu_id), '--auto-boost-default=' + mode]
         success, output = self.run_command(cmd, check=False)
         if success:
             self.settings[f'gpu_{gpu_id}_auto_boost'] = enabled
             self.save_settings()
             print(f"✓ Auto boost {'enabled' if enabled else 'disabled'} for GPU {gpu_id}")
+            print(f"⚠  Note: This feature is deprecated and may be removed in future CUDA releases")
         else:
-            print(f"✗ Failed to set auto boost (may not be supported on this GPU): {output}")
+            print(f"✗ Auto boost not supported on this GPU (deprecated NVIDIA feature)")
+            print(f"   This is normal for modern GPUs (RTX 30/40 series, A100, H100)")
         input("\nPress Enter to continue...")
     
     def set_application_clocks(self, gpu_id: int, mem_clock: int, graphics_clock: int):
         """Set application-specific clock speeds"""
+        if not self.validate_gpu_id(gpu_id):
+            input("\nPress Enter to continue...")
+            return
+
         cmd = ['sudo', 'nvidia-smi', '-i', str(gpu_id), '-ac', f'{mem_clock},{graphics_clock}']
         success, output = self.run_command(cmd)
         if success:
@@ -210,6 +268,10 @@ class NvidiaGPUController:
     
     def reset_application_clocks(self, gpu_id: int):
         """Reset application clocks to default"""
+        if not self.validate_gpu_id(gpu_id):
+            input("\nPress Enter to continue...")
+            return
+
         cmd = ['sudo', 'nvidia-smi', '-i', str(gpu_id), '-rac']
         success, output = self.run_command(cmd)
         if success:
@@ -223,6 +285,10 @@ class NvidiaGPUController:
     
     def set_gpu_reset(self, gpu_id: int):
         """Reset GPU (requires no processes using GPU)"""
+        if not self.validate_gpu_id(gpu_id):
+            input("\nPress Enter to continue...")
+            return
+
         cmd = ['sudo', 'nvidia-smi', '-i', str(gpu_id), '-r']
         success, output = self.run_command(cmd)
         if success:
@@ -233,6 +299,10 @@ class NvidiaGPUController:
     
     def set_accounting_mode(self, gpu_id: int, enabled: bool):
         """Enable/Disable accounting mode for process tracking"""
+        if not self.validate_gpu_id(gpu_id):
+            input("\nPress Enter to continue...")
+            return
+
         mode = '1' if enabled else '0'
         cmd = ['sudo', 'nvidia-smi', '-i', str(gpu_id), '-am', mode]
         success, output = self.run_command(cmd)
@@ -246,6 +316,10 @@ class NvidiaGPUController:
     
     def clear_accounting_data(self, gpu_id: int):
         """Clear all accounting data"""
+        if not self.validate_gpu_id(gpu_id):
+            input("\nPress Enter to continue...")
+            return
+
         cmd = ['sudo', 'nvidia-smi', '-i', str(gpu_id), '-caa']
         success, output = self.run_command(cmd)
         if success:
@@ -256,6 +330,10 @@ class NvidiaGPUController:
     
     def set_mig_mode(self, gpu_id: int, enabled: bool):
         """Enable/Disable MIG mode (Multi-Instance GPU) - requires reboot"""
+        if not self.validate_gpu_id(gpu_id):
+            input("\nPress Enter to continue...")
+            return
+
         mode = '1' if enabled else '0'
         cmd = ['sudo', 'nvidia-smi', '-i', str(gpu_id), '-mig', mode]
         success, output = self.run_command(cmd)
@@ -269,6 +347,10 @@ class NvidiaGPUController:
     
     def query_gpu_details(self, gpu_id: int):
         """Query detailed GPU information"""
+        if not self.validate_gpu_id(gpu_id):
+            input("\nPress Enter to continue...")
+            return
+
         cmd = ['nvidia-smi', '-i', str(gpu_id), '-q']
         success, output = self.run_command(cmd)
         if success:
@@ -300,6 +382,10 @@ class NvidiaGPUController:
     
     def query_supported_clocks(self, gpu_id: int):
         """Query supported clock combinations"""
+        if not self.validate_gpu_id(gpu_id):
+            input("\nPress Enter to continue...")
+            return
+
         cmd = ['nvidia-smi', '-i', str(gpu_id), '-q', '-d', 'SUPPORTED_CLOCKS']
         success, output = self.run_command(cmd)
         if success:

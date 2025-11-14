@@ -236,15 +236,16 @@ class VLLMOptimizer:
         status = "✓" if success else "✗"
         results.append(f"{status} Power limit: {power_limit}W")
         
-        # 4. Set auto boost
+        # 4. Set auto boost (deprecated feature, may not work on modern GPUs)
         if profile_data.get('auto_boost') is not None:
             mode = '1' if profile_data['auto_boost'] else '0'
-            # Use correct flag for auto boost
-            cmd = ['sudo', 'nvidia-smi', '-i', str(gpu_id), '--auto-boost-permission=' + mode]
+            # NOTE: --auto-boost-default is deprecated, controls whether auto-boost is enabled
+            cmd = ['sudo', 'nvidia-smi', '-i', str(gpu_id), '--auto-boost-default=' + mode]
             success, output = self.run_command(cmd, check=False)  # May not be supported
             if success:
-                status = "✓"
-                results.append(f"{status} Auto boost: {'Enabled' if profile_data['auto_boost'] else 'Disabled'}")
+                results.append(f"✓ Auto boost: {'Enabled' if profile_data['auto_boost'] else 'Disabled'} (deprecated feature)")
+            else:
+                results.append(f"⚠ Auto boost not supported (normal for modern GPUs)")
         
         # 5. Set GPU clocks
         mem_clock, graphics_clock = self.get_optimal_clocks(gpu_id, profile)
