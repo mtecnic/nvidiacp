@@ -51,6 +51,11 @@ cat > "$SERVICE_FILE" << EOF
 [Unit]
 Description=NVIDIA GPU Settings Persistence
 After=multi-user.target nvidia-persistenced.service
+Wants=nvidia-persistenced.service
+# Wait for NVIDIA driver modules to be loaded
+After=systemd-modules-load.service
+# Ensure nvidia-smi is available
+ConditionPathExists=/usr/bin/nvidia-smi
 
 [Service]
 Type=oneshot
@@ -58,6 +63,10 @@ ExecStart=/usr/bin/python3 $SCRIPT_DIR/nvidia_control.py --apply-settings
 RemainAfterExit=yes
 StandardOutput=journal
 StandardError=journal
+# Restart on failure (network issues, driver delays, etc.)
+Restart=on-failure
+RestartSec=5
+StartLimitBurst=3
 
 [Install]
 WantedBy=multi-user.target

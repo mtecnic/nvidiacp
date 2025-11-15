@@ -669,71 +669,213 @@ class NvidiaGPUController:
         input("\nPress Enter to continue...")
     
     def apply_all_settings(self):
-        """Apply all saved settings"""
+        """Apply all saved settings with proper ordering and logging"""
+        import sys
+        import logging
+
+        # Set up logging for systemd
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(levelname)s - %(message)s',
+            handlers=[logging.StreamHandler(sys.stdout)]
+        )
+
         if not self.settings:
-            print("No saved settings to apply")
-            time.sleep(2)
+            logging.info("No saved settings to apply")
+            time.sleep(1)
             return
-            
-        print("Applying saved settings...")
-        applied_count = 0
-        total_count = 0
-        
+
+        # Wait for nvidia-smi to be ready (fixes race condition)
+        logging.info("Waiting for nvidia-smi to be ready...")
+        max_retries = 10
+        for attempt in range(max_retries):
+            success, _ = self.run_command(['nvidia-smi', '-L'], check=False)
+            if success:
+                logging.info("nvidia-smi is ready")
+                break
+            logging.warning(f"nvidia-smi not ready, attempt {attempt+1}/{max_retries}")
+            time.sleep(2)
+        else:
+            logging.error("nvidia-smi never became ready - aborting")
+            sys.exit(1)
+
+        # Group settings by GPU for ordered application
+        gpu_settings = {}
         for key, value in self.settings.items():
             parts = key.split('_')
             if len(parts) >= 3 and parts[0] == 'gpu':
                 gpu_id = int(parts[1])
                 setting_type = '_'.join(parts[2:])
-                total_count += 1
-                
+                if gpu_id not in gpu_settings:
+                    gpu_settings[gpu_id] = {}
+                gpu_settings[gpu_id][setting_type] = value
+
+        # Define setting application order (persistence mode MUST be first)
+        SETTING_ORDER = [
+            'persistence',      # CRITICAL: Must be first
+            'ecc',              # Requires reboot
+            'mig',              # MIG mode configuration
+            'compute_mode',     # Compute mode
+            'power_limit',      # Power limit
+            'app_mem_clock',    # Application clocks (with graphics)
+            'accounting',       # Accounting mode
+            'gom',              # GPU operation mode
+        ]
+
+        def apply_setting_with_retry(gpu_id, setting_type, value, max_retries=3):
+            """Apply a single setting with retry logic"""
+            for attempt in range(max_retries):
                 try:
                     if setting_type == 'persistence':
                         cmd = ['sudo', 'nvidia-smi', '-i', str(gpu_id), '-pm', '1' if value else '0']
-                        success, _ = self.run_command(cmd)
-                        if success: applied_count += 1
+                        success, output = self.run_command(cmd, check=False)
+                        if success:
+                            logging.info(f"GPU {gpu_id}: Persistence mode set to {value}")
+                            return True
+                        else:
+                            logging.warning(f"GPU {gpu_id}: Persistence mode failed (attempt {attempt+1}/{max_retries}): {output}")
+
                     elif setting_type == 'power_limit':
                         cmd = ['sudo', 'nvidia-smi', '-i', str(gpu_id), '-pl', str(value)]
-                        success, _ = self.run_command(cmd)
-                        if success: applied_count += 1
+                        success, output = self.run_command(cmd, check=False)
+                        if success:
+                            logging.info(f"GPU {gpu_id}: Power limit set to {value}W")
+                            return True
+                        else:
+                            logging.warning(f"GPU {gpu_id}: Power limit failed (attempt {attempt+1}/{max_retries}): {output}")
+
                     elif setting_type == 'compute_mode':
                         cmd = ['sudo', 'nvidia-smi', '-i', str(gpu_id), '-c', str(value)]
-                        success, _ = self.run_command(cmd)
-                        if success: applied_count += 1
+                        success, output = self.run_command(cmd, check=False)
+                        if success:
+                            logging.info(f"GPU {gpu_id}: Compute mode set to {value}")
+                            return True
+                        else:
+                            logging.warning(f"GPU {gpu_id}: Compute mode failed (attempt {attempt+1}/{max_retries}): {output}")
+
                     elif setting_type == 'ecc':
                         cmd = ['sudo', 'nvidia-smi', '-i', str(gpu_id), '-e', '1' if value else '0']
-                        success, _ = self.run_command(cmd, check=False)
-                        if success: applied_count += 1
+                        success, output = self.run_command(cmd, check=False)
+                        if success:
+                            logging.info(f"GPU {gpu_id}: ECC set to {value}")
+                            return True
+                        else:
+                            logging.warning(f"GPU {gpu_id}: ECC failed (attempt {attempt+1}/{max_retries}): {output}")
+
                     elif setting_type == 'app_mem_clock':
+                        # Application clocks require both memory and graphics clocks
                         graphics_key = f'gpu_{gpu_id}_app_graphics_clock'
                         if graphics_key in self.settings:
                             graphics_clock = self.settings[graphics_key]
                             cmd = ['sudo', 'nvidia-smi', '-i', str(gpu_id), '-ac', f'{value},{graphics_clock}']
-                            success, _ = self.run_command(cmd, check=False)
-                            if success: applied_count += 1
+                            success, output = self.run_command(cmd, check=False)
+                            if success:
+                                logging.info(f"GPU {gpu_id}: Application clocks set to mem={value} graphics={graphics_clock}")
+                                return True
+                            else:
+                                logging.warning(f"GPU {gpu_id}: Application clocks failed (attempt {attempt+1}/{max_retries}): {output}")
+                        else:
+                            # Skip if graphics clock not set
+                            logging.info(f"GPU {gpu_id}: Skipping memory clock (graphics clock not set)")
+                            return True
+
+                    elif setting_type == 'app_graphics_clock':
+                        # Skip - handled together with app_mem_clock
+                        return True
+
                     elif setting_type == 'accounting':
                         cmd = ['sudo', 'nvidia-smi', '-i', str(gpu_id), '-am', '1' if value else '0']
-                        success, _ = self.run_command(cmd, check=False)
-                        if success: applied_count += 1
+                        success, output = self.run_command(cmd, check=False)
+                        if success:
+                            logging.info(f"GPU {gpu_id}: Accounting mode set to {value}")
+                            return True
+                        else:
+                            logging.warning(f"GPU {gpu_id}: Accounting mode failed (attempt {attempt+1}/{max_retries}): {output}")
+
                     elif setting_type == 'mig':
                         cmd = ['sudo', 'nvidia-smi', '-i', str(gpu_id), '-mig', '1' if value else '0']
-                        success, _ = self.run_command(cmd, check=False)
-                        if success: applied_count += 1
+                        success, output = self.run_command(cmd, check=False)
+                        if success:
+                            logging.info(f"GPU {gpu_id}: MIG mode set to {value}")
+                            return True
+                        else:
+                            logging.warning(f"GPU {gpu_id}: MIG mode failed (attempt {attempt+1}/{max_retries}): {output}")
+
                     elif setting_type == 'gom':
                         # Try modern flag first
                         cmd = ['sudo', 'nvidia-smi', '-i', str(gpu_id), '--gpu-operation-mode=' + str(value)]
-                        success, _ = self.run_command(cmd, check=False)
+                        success, output = self.run_command(cmd, check=False)
                         if not success:
                             # Fall back to deprecated flag
                             cmd = ['sudo', 'nvidia-smi', '-i', str(gpu_id), '--gom=' + str(value)]
-                            success, _ = self.run_command(cmd, check=False)
-                        if success: applied_count += 1
+                            success, output = self.run_command(cmd, check=False)
+                        if success:
+                            logging.info(f"GPU {gpu_id}: GOM set to {value}")
+                            return True
+                        else:
+                            logging.warning(f"GPU {gpu_id}: GOM failed (attempt {attempt+1}/{max_retries}): {output}")
+
+                    else:
+                        # Unknown setting type
+                        logging.warning(f"GPU {gpu_id}: Unknown setting type '{setting_type}'")
+                        return True
+
+                    # If we get here, the setting failed - wait before retry
+                    if attempt < max_retries - 1:
+                        time.sleep(1)
+
                 except Exception as e:
-                    print(f"Failed to apply {key}: {e}")
-        
-        print(f"✓ Applied {applied_count}/{total_count} settings successfully")
-        if applied_count < total_count:
-            print("Some settings failed - this is normal for unsupported features")
-        time.sleep(2)
+                    logging.error(f"GPU {gpu_id}: Exception applying {setting_type}: {e}")
+                    if attempt < max_retries - 1:
+                        time.sleep(1)
+
+            # All retries exhausted
+            logging.error(f"GPU {gpu_id}: Failed to apply {setting_type}={value} after {max_retries} attempts")
+            return False
+
+        # Apply settings for each GPU in proper order
+        total_settings = 0
+        applied_settings = 0
+        failed_settings = []
+
+        for gpu_id in sorted(gpu_settings.keys()):
+            logging.info(f"Applying settings for GPU {gpu_id}...")
+            settings = gpu_settings[gpu_id]
+
+            # Apply in defined order
+            for setting_type in SETTING_ORDER:
+                if setting_type in settings:
+                    total_settings += 1
+                    value = settings[setting_type]
+
+                    if apply_setting_with_retry(gpu_id, setting_type, value):
+                        applied_settings += 1
+                    else:
+                        failed_settings.append(f"gpu_{gpu_id}_{setting_type}")
+
+            # Apply any settings not in the defined order
+            for setting_type, value in settings.items():
+                if setting_type not in SETTING_ORDER:
+                    total_settings += 1
+                    if apply_setting_with_retry(gpu_id, setting_type, value):
+                        applied_settings += 1
+                    else:
+                        failed_settings.append(f"gpu_{gpu_id}_{setting_type}")
+
+        # Log final results
+        logging.info(f"Settings application complete: {applied_settings}/{total_settings} successful")
+
+        if failed_settings:
+            logging.warning(f"Failed settings: {', '.join(failed_settings)}")
+            logging.info("Note: Some failures are normal for unsupported GPU features")
+
+        # Exit with appropriate code for systemd
+        if applied_settings == 0 and total_settings > 0:
+            logging.error("CRITICAL: No settings were applied successfully")
+            sys.exit(1)
+
+        logging.info("Settings persistence completed successfully")
+        sys.exit(0)
     
     def reset_all_gpus(self):
         """Reset all GPUs to default settings"""
