@@ -81,6 +81,262 @@ class NvidiaGPUController:
             print(f"✗ Invalid GPU ID: {gpu_id}. Valid range is 0-{current_count - 1}")
             return False
         return True
+
+    def get_gpu_architecture(self, gpu_id: int) -> Tuple[str, str]:
+        """Get GPU architecture and compute capability"""
+        cmd = ['nvidia-smi', '-i', str(gpu_id), '--query-gpu=name,compute_cap', '--format=csv,noheader']
+        success, output = self.run_command(cmd, check=False)
+        if success and output.strip():
+            parts = output.strip().split(', ')
+            if len(parts) >= 2:
+                gpu_name = parts[0]
+                compute_cap = parts[1]
+
+                # Determine architecture from compute capability
+                if compute_cap.startswith('8.9'):
+                    arch = 'Ada Lovelace'
+                elif compute_cap.startswith('8.6'):
+                    arch = 'Ampere (RTX 30/A6000)'
+                elif compute_cap.startswith('8.0'):
+                    arch = 'Ampere (A100)'
+                elif compute_cap.startswith('7.5'):
+                    arch = 'Turing'
+                elif compute_cap.startswith('7.0'):
+                    arch = 'Volta'
+                else:
+                    arch = f'Compute {compute_cap}'
+
+                return arch, compute_cap
+        return 'Unknown', '0.0'
+
+    def is_ampere(self, gpu_id: int) -> bool:
+        """Check if GPU is Ampere architecture (8.0 or 8.6)"""
+        arch, compute_cap = self.get_gpu_architecture(gpu_id)
+        return compute_cap.startswith('8.0') or compute_cap.startswith('8.6')
+
+    def show_throttle_reasons(self, gpu_id: int):
+        """Show detailed throttle reasons for Ampere GPUs"""
+        if not self.validate_gpu_id(gpu_id):
+            input("\nPress Enter to continue...")
+            return
+
+        os.system('clear')
+        print("=" * 70)
+        print("GPU Throttle Analysis".center(70))
+        print("=" * 70)
+        print()
+
+        # Get GPU info
+        arch, compute_cap = self.get_gpu_architecture(gpu_id)
+        print(f"GPU {gpu_id} Architecture: {arch} (Compute {compute_cap})")
+        print()
+
+        # Query throttle reasons
+        cmd = ['nvidia-smi', '-i', str(gpu_id),
+               '--query-gpu=clocks_throttle_reasons.active,'
+               'clocks_throttle_reasons.gpu_idle,'
+               'clocks_throttle_reasons.applications_clocks_setting,'
+               'clocks_throttle_reasons.sw_power_cap,'
+               'clocks_throttle_reasons.hw_slowdown,'
+               'clocks_throttle_reasons.sync_boost,'
+               'clocks_throttle_reasons.sw_thermal_slowdown,'
+               'clocks_throttle_reasons.hw_thermal_slowdown',
+               '--format=csv,noheader']
+
+        success, output = self.run_command(cmd, check=False)
+        if success and output.strip():
+            reasons = output.strip().split(', ')
+            reason_names = [
+                'Active Throttling',
+                'GPU Idle',
+                'Application Clocks Set',
+                'SW Power Cap',
+                'HW Slowdown',
+                'Sync Boost',
+                'SW Thermal Slowdown',
+                'HW Thermal Slowdown'
+            ]
+
+            print("Throttle Reasons:")
+            print("-" * 70)
+            any_active = False
+            for i, (name, value) in enumerate(zip(reason_names, reasons)):
+                status = "✓ ACTIVE" if value == 'Active' else "○ Inactive"
+                if value == 'Active' and i > 0:  # Skip first one (general active flag)
+                    any_active = True
+                    print(f"  {status:<15} {name}")
+                elif i == 0:
+                    continue
+                else:
+                    print(f"  {status:<15} {name}")
+
+            if not any_active:
+                print("\n✓ No throttling detected - GPU running at full performance")
+            else:
+                print("\n⚠ Throttling detected - see active reasons above")
+
+        # Show current clocks vs max
+        print()
+        print("=" * 70)
+        cmd = ['nvidia-smi', '-i', str(gpu_id),
+               '--query-gpu=clocks.current.graphics,clocks.max.graphics,'
+               'clocks.current.memory,clocks.max.memory,'
+               'temperature.gpu,power.draw,power.limit',
+               '--format=csv,noheader,nounits']
+        success, output = self.run_command(cmd, check=False)
+        if success and output.strip():
+            parts = output.strip().split(', ')
+            if len(parts) >= 7:
+                curr_graphics = int(parts[0])
+                max_graphics = int(parts[1])
+                curr_memory = int(parts[2])
+                max_memory = int(parts[3])
+                temp = float(parts[4])
+                power_draw = float(parts[5])
+                power_limit = float(parts[6])
+
+                print(f"Graphics Clock: {curr_graphics} MHz (max: {max_graphics} MHz) "
+                      f"- {curr_graphics/max_graphics*100:.1f}%")
+                print(f"Memory Clock:   {curr_memory} MHz (max: {max_memory} MHz) "
+                      f"- {curr_memory/max_memory*100:.1f}%")
+                print(f"Temperature:    {temp}°C")
+                print(f"Power Draw:     {power_draw:.1f}W / {power_limit:.1f}W "
+                      f"- {power_draw/power_limit*100:.1f}%")
+
+        input("\nPress Enter to continue...")
+
+    def show_ampere_status(self, gpu_id: int):
+        """Show Ampere-specific status and recommendations"""
+        if not self.validate_gpu_id(gpu_id):
+            input("\nPress Enter to continue...")
+            return
+
+        os.system('clear')
+        arch, compute_cap = self.get_gpu_architecture(gpu_id)
+
+        print("=" * 70)
+        print("Ampere GPU Status & Recommendations".center(70))
+        print("=" * 70)
+        print()
+
+        # Get detailed GPU info
+        cmd = ['nvidia-smi', '-i', str(gpu_id),
+               '--query-gpu=name,memory.total,temperature.gpu,temperature.memory,'
+               'power.draw,power.limit,power.default_limit,power.max_limit,'
+               'utilization.gpu,utilization.memory,'
+               'clocks.current.graphics,clocks.max.graphics,'
+               'clocks.current.memory,clocks.max.memory,'
+               'persistence_mode,compute_mode',
+               '--format=csv,noheader,nounits']
+
+        success, output = self.run_command(cmd, check=False)
+        if not success or not output.strip():
+            print("✗ Failed to query GPU information")
+            input("\nPress Enter to continue...")
+            return
+
+        parts = output.strip().split(', ')
+        if len(parts) < 16:
+            print("✗ Unexpected GPU query response")
+            input("\nPress Enter to continue...")
+            return
+
+        gpu_name = parts[0]
+        memory_total = int(parts[1])
+        temp_gpu = float(parts[2])
+        temp_mem = parts[3]  # May be N/A
+        power_draw = float(parts[4])
+        power_limit = float(parts[5])
+        power_default = float(parts[6])
+        power_max = float(parts[7])
+        util_gpu = int(parts[8])
+        util_mem = int(parts[9])
+        clock_graphics = int(parts[10])
+        clock_graphics_max = int(parts[11])
+        clock_memory = int(parts[12])
+        clock_memory_max = int(parts[13])
+        persistence = parts[14]
+        compute_mode = parts[15]
+
+        print(f"GPU Name:     {gpu_name}")
+        print(f"Architecture: {arch} (Compute {compute_cap})")
+        print(f"Memory:       {memory_total / 1024:.1f} GB")
+        print()
+
+        # Current Status
+        print("Current Status:")
+        print("-" * 70)
+        print(f"  GPU Temperature:    {temp_gpu}°C", end="")
+        if temp_gpu >= 83:
+            print(" ⚠ THROTTLING LIKELY (>83°C)")
+        elif temp_gpu >= 75:
+            print(" ⚠ Running hot")
+        else:
+            print(" ✓ Good")
+
+        if temp_mem != "N/A":
+            temp_mem_val = float(temp_mem)
+            print(f"  Memory Temperature: {temp_mem_val}°C", end="")
+            if temp_mem_val >= 95:
+                print(" ⚠ CRITICAL (GDDR6X)")
+            elif temp_mem_val >= 90:
+                print(" ⚠ High (GDDR6X)")
+            else:
+                print(" ✓ Good")
+
+        print(f"  Power Draw:         {power_draw:.1f}W / {power_limit:.1f}W ({power_draw/power_limit*100:.1f}%)")
+        print(f"  GPU Utilization:    {util_gpu}%")
+        print(f"  Memory Utilization: {util_mem}%")
+        print(f"  Graphics Clock:     {clock_graphics} MHz / {clock_graphics_max} MHz ({clock_graphics/clock_graphics_max*100:.1f}%)")
+        print(f"  Memory Clock:       {clock_memory} MHz / {clock_memory_max} MHz ({clock_memory/clock_memory_max*100:.1f}%)")
+        print()
+
+        # Configuration
+        print("Configuration:")
+        print("-" * 70)
+        print(f"  Persistence Mode:   {persistence}")
+        print(f"  Compute Mode:       {compute_mode}")
+        print(f"  Power Limit:        {power_limit:.0f}W (default: {power_default:.0f}W, max: {power_max:.0f}W)")
+        print()
+
+        # Recommendations
+        print("Recommendations for AI/ML Workloads:")
+        print("-" * 70)
+
+        recommendations = []
+        if persistence != "Enabled":
+            recommendations.append("⚠ Enable Persistence Mode (Menu option 6)")
+
+        if power_limit < power_max * 0.95:
+            recommendations.append(f"  Consider increasing power limit to {power_max:.0f}W for max performance")
+
+        if clock_memory < clock_memory_max * 0.9:
+            recommendations.append(f"  Lock memory clock to {clock_memory_max} MHz for consistency")
+
+        if temp_gpu >= 80:
+            recommendations.append("  Improve cooling - temperature is high")
+
+        if temp_mem != "N/A" and float(temp_mem) >= 90:
+            recommendations.append("  Add memory cooling - GDDR6X running hot!")
+
+        # Ampere-specific recommendations
+        if '3090' in gpu_name or '3080' in gpu_name:
+            recommendations.append(f"  Optimal clocks: -ac {clock_memory_max},1860 (stable)")
+            recommendations.append(f"  For 24/7 use: -pl 320 (better thermals)")
+        elif 'A100' in gpu_name:
+            recommendations.append("  Enable ECC if not already (reliability)")
+            recommendations.append("  Consider MIG mode for multi-tenancy")
+        elif 'A6000' in gpu_name or 'A40' in gpu_name:
+            recommendations.append("  Enable ECC for production workloads")
+            recommendations.append(f"  Optimal clocks: -ac {clock_memory_max},1860")
+
+        if recommendations:
+            for rec in recommendations:
+                print(rec)
+        else:
+            print("  ✓ Configuration looks optimal!")
+
+        input("\nPress Enter to continue...")
     
     def get_gpu_info(self) -> str:
         """Get current GPU information"""
@@ -580,7 +836,11 @@ class NvidiaGPUController:
             
             print("\n=== Specialized Tools ===")
             print("23. vLLM Optimization Tool")
-            
+
+            print("\n=== Ampere GPU Tools (RTX 30/A100/A6000) ===")
+            print("24. Show Throttle Reasons")
+            print("25. Ampere Status & Recommendations")
+
             print("\n0. Exit")
             print("\n" + "=" * 60)
             
@@ -784,7 +1044,17 @@ class NvidiaGPUController:
                     else:
                         print("vLLM optimizer not found!")
                         input("\nPress Enter to continue...")
-                
+
+                # Ampere GPU Tools
+                elif choice == '24':
+                    gpu_id = self.select_gpu()
+                    if gpu_id is not None and gpu_id != -1:
+                        self.show_throttle_reasons(gpu_id)
+                elif choice == '25':
+                    gpu_id = self.select_gpu()
+                    if gpu_id is not None and gpu_id != -1:
+                        self.show_ampere_status(gpu_id)
+
             except KeyboardInterrupt:
                 break
             except Exception as e:

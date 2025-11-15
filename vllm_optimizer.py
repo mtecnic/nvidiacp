@@ -63,6 +63,46 @@ class VLLMOptimizer:
                 'auto_boost': True,
                 'gpu_clocks': 'stable',
                 'ecc': True,  # Enable ECC for reliability
+            },
+            'rtx_3090_max': {
+                'name': 'RTX 3090 Maximum Performance',
+                'description': 'Optimized for RTX 3090/3080 Ti - maximum AI/ML performance',
+                'persistence_mode': True,
+                'compute_mode': 0,
+                'power_limit': 'max',  # 350W for 3090, 450W for 3090 Ti
+                'auto_boost': False,  # Deprecated on Ampere
+                'gpu_clocks': 'ampere_max',
+                'ecc': False,  # Not supported on RTX
+            },
+            'rtx_3090_stable': {
+                'name': 'RTX 3090 24/7 Stable',
+                'description': 'RTX 3090/3080 Ti - reduced power for 24/7 inference',
+                'persistence_mode': True,
+                'compute_mode': 0,
+                'power_limit': 320,  # Reduced from 350W for better thermals
+                'auto_boost': False,
+                'gpu_clocks': 'ampere_stable',
+                'ecc': False,
+            },
+            'a100_max': {
+                'name': 'A100 Maximum Performance',
+                'description': 'A100 optimized for maximum throughput',
+                'persistence_mode': True,
+                'compute_mode': 3,  # Exclusive Process for A100
+                'power_limit': 'max',  # 400W for SXM4, 250W for PCIe
+                'auto_boost': False,
+                'gpu_clocks': 'a100_max',
+                'ecc': True,  # Enable ECC on A100
+            },
+            'a6000_production': {
+                'name': 'A6000/A40 Production',
+                'description': 'A6000/A40 optimized for production AI workloads',
+                'persistence_mode': True,
+                'compute_mode': 0,
+                'power_limit': 300,  # Max for A6000/A40
+                'auto_boost': False,
+                'gpu_clocks': 'a6000_max',
+                'ecc': True,  # Enable ECC
             }
         }
         
@@ -156,7 +196,7 @@ class VLLMOptimizer:
             return None, None
         
         profile_data = self.profiles[profile]
-        
+
         # Select clocks based on profile preference
         if profile_data['gpu_clocks'] == 'prefer_memory':
             # Highest memory clock
@@ -183,6 +223,35 @@ class VLLMOptimizer:
             mem_clock = mem_clocks[int(len(mem_clocks) * 0.8)] if len(mem_clocks) > 1 else mem_clocks[0]
             gc_list = graphics_clocks.get(mem_clock, [])
             graphics_clock = gc_list[int(len(gc_list) * 0.8)] if len(gc_list) > 1 else gc_list[0] if gc_list else 0
+        # Ampere-specific clock profiles
+        elif profile_data['gpu_clocks'] == 'ampere_max':
+            # RTX 3090/3080: Max memory (9751 MHz), high stable graphics (1860 MHz)
+            mem_clock = max(mem_clocks)
+            gc_list = graphics_clocks.get(mem_clock, [])
+            # Try to find 1860 MHz or closest
+            if gc_list:
+                target = 1860
+                graphics_clock = min(gc_list, key=lambda x: abs(x - target))
+        elif profile_data['gpu_clocks'] == 'ampere_stable':
+            # RTX 3090/3080: Max memory, conservative graphics (1695 MHz)
+            mem_clock = max(mem_clocks)
+            gc_list = graphics_clocks.get(mem_clock, [])
+            if gc_list:
+                target = 1695
+                graphics_clock = min(gc_list, key=lambda x: abs(x - target))
+        elif profile_data['gpu_clocks'] == 'a100_max':
+            # A100: Typically 1215 MHz memory, 1410 MHz graphics
+            mem_clock = max(mem_clocks)
+            gc_list = graphics_clocks.get(mem_clock, [])
+            if gc_list:
+                graphics_clock = max(gc_list)
+        elif profile_data['gpu_clocks'] == 'a6000_max':
+            # A6000: Typically 8001 MHz memory, 1860 MHz graphics
+            mem_clock = max(mem_clocks)
+            gc_list = graphics_clocks.get(mem_clock, [])
+            if gc_list:
+                target = 1860
+                graphics_clock = min(gc_list, key=lambda x: abs(x - target))
         else:  # balanced
             # 90% of maximum
             mem_clock = mem_clocks[int(len(mem_clocks) * 0.9)] if len(mem_clocks) > 1 else mem_clocks[0]
