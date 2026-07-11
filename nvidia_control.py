@@ -180,8 +180,38 @@ class NvidiaGPUController:
         with open(self.settings_file, 'w') as f:
             json.dump(self.settings, f, indent=2)
     
+    @staticmethod
+    def _is_root() -> bool:
+        return hasattr(os, 'geteuid') and os.geteuid() == 0
+
+    def _strip_sudo(self, cmd: List[str]) -> List[str]:
+        """Drop a leading 'sudo' when we are already root (e.g. the systemd
+        --apply-settings service), so we don't depend on root having sudo
+        configured. No-op for a normal interactive user."""
+        if cmd and cmd[0] == 'sudo' and self._is_root():
+            return cmd[1:]
+        return cmd
+
+    def _prime_sudo(self) -> bool:
+        """Ensure privileged commands can run without a hidden password prompt.
+
+        When already root, nothing is needed. Otherwise validate/refresh the
+        sudo credential with a VISIBLE prompt (`sudo -v`, not captured) so the
+        later capture_output=True nvidia-smi calls don't silently block waiting
+        for a password the user can't see. Returns False if authentication
+        fails (e.g. no TTY, wrong password)."""
+        if self._is_root():
+            return True
+        try:
+            # Not captured: the "[sudo] password" prompt shows on the terminal.
+            result = subprocess.run(['sudo', '-v'])
+            return result.returncode == 0
+        except Exception:
+            return False
+
     def run_command(self, cmd: List[str], check: bool = True) -> Tuple[bool, str]:
         """Run a command and return success status and output"""
+        cmd = self._strip_sudo(cmd)
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, check=check)
             return True, result.stdout
@@ -390,10 +420,11 @@ class NvidiaGPUController:
             return None
 
     def _sudo_write_sysfs(self, path: str, value: Any) -> Tuple[bool, str]:
-        """Write to a root-owned sysfs attribute via sudo tee"""
+        """Write to a root-owned sysfs attribute (via sudo tee, or plain tee
+        when already root)."""
         try:
             result = subprocess.run(
-                ['sudo', 'tee', path],
+                self._strip_sudo(['sudo', 'tee', path]),
                 input=f'{value}\n', text=True, capture_output=True)
             return result.returncode == 0, result.stderr
         except Exception as e:
@@ -873,7 +904,12 @@ class NvidiaGPUController:
             print("No saved settings to apply")
             time.sleep(2)
             return
-            
+
+        # Authenticate up front with a visible prompt so the captured
+        # nvidia-smi calls below don't silently block on a hidden [sudo] prompt.
+        if not self._prime_sudo():
+            print("⚠ Could not obtain sudo privileges — settings may not apply.")
+
         print("Applying saved settings...")
         applied_count = 0
         total_count = 0
@@ -1818,12 +1854,20 @@ class NvidiaGPUController:
         """Generate systemd service for boot persistence"""
         service_content = f"""[Unit]
 Description=NVIDIA GPU Settings Persistence
-After=multi-user.target
+After=multi-user.target nvidia-persistenced.service
+Wants=nvidia-persistenced.service
+ConditionPathExists=/usr/bin/nvidia-smi
 
 [Service]
 Type=oneshot
+User=root
+Environment="PATH=/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin"
+ExecStartPre=/bin/sleep 5
 ExecStart=/usr/bin/python3 {os.path.abspath(__file__)} --apply-settings
 RemainAfterExit=yes
+StandardOutput=journal
+StandardError=journal
+TimeoutStartSec=60
 
 [Install]
 WantedBy=multi-user.target
