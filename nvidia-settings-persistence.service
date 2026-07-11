@@ -9,7 +9,7 @@ Type=oneshot
 User=root
 Environment="PATH=/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin"
 ExecStartPre=/bin/sleep 5
-ExecStart=/usr/bin/python3 /home/waive/nvidiacp/nvidia_control.py --apply-settings
+ExecStart=/usr/bin/python3 /home/waive5/nvidiacp/nvidia_control.py --apply-settings
 RemainAfterExit=yes
 StandardOutput=journal
 StandardError=journal
