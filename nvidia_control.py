@@ -461,18 +461,112 @@ class NvidiaGPUController:
             print(f"✗ Failed to set compute mode: {output}")
         input("\nPress Enter to continue...")
     
+    def _nvml_fan_cmd(self, *nvml_args: str) -> List[str]:
+        """Build the sudo self-invocation for a privileged NVML fan op.
+
+        NVML fan writes must run in a root process, so we re-exec this script's
+        --nvml-fan handler under sudo. _strip_sudo drops the leading 'sudo' when
+        we are already root (the boot --apply-settings service), so it works in
+        both cases without depending on root having sudo configured."""
+        return ['sudo', sys.executable, os.path.realpath(__file__),
+                '--nvml-fan', *nvml_args]
+
     def set_fan_speed(self, gpu_id: int, speed: int):
-        """Set fan speed (requires coolbits enabled in X11)"""
-        # Note: This requires X11 and coolbits configuration
-        cmd = ['nvidia-settings', '-a', f'[gpu:{gpu_id}]/GPUFanControlState=1', '-a', f'[fan:{gpu_id}]/GPUTargetFanSpeed={speed}']
-        success, output = self.run_command(cmd)
+        """Set GPU fan speed via NVML — no X server or coolbits required.
+
+        Drives every fan on the card. The NVML helper clamps to the card's
+        supported range (the RTX 3090 floor is 30%), so a request below the
+        minimum is raised rather than rejected."""
+        self._prime_sudo()  # surface the [sudo] prompt before the captured call
+        success, output = self.run_command(
+            self._nvml_fan_cmd('set', str(gpu_id), str(speed)))
         if success:
+            # Fixed speed and target-temp auto are mutually exclusive per GPU.
+            self.settings.pop(f'gpu_{gpu_id}_fan_target_temp', None)
             self.settings[f'gpu_{gpu_id}_fan_speed'] = speed
             self.save_settings()
-            print(f"✓ Fan speed set to {speed}% for GPU {gpu_id}")
+            print(f"✓ {output.strip() or f'Fan speed set to {speed}% for GPU {gpu_id}'}")
         else:
-            print(f"✗ Failed to set fan speed (may require X11 and coolbits): {output}")
+            print(f"✗ Failed to set fan speed: {output.strip()}")
         input("\nPress Enter to continue...")
+
+    def set_fan_auto_gpu(self, gpu_id: int):
+        """Return a GPU's fans to automatic (VBIOS) control and drop the saved
+        manual speed so it is not reapplied at boot."""
+        self._prime_sudo()
+        success, output = self.run_command(self._nvml_fan_cmd('auto', str(gpu_id)))
+        if success:
+            # Clear both fan modes so neither service reasserts a speed.
+            self.settings.pop(f'gpu_{gpu_id}_fan_speed', None)
+            self.settings.pop(f'gpu_{gpu_id}_fan_target_temp', None)
+            self.save_settings()
+            print(f"✓ {output.strip() or f'GPU {gpu_id} fans returned to automatic control'}")
+        else:
+            print(f"✗ Failed to restore automatic fan control: {output.strip()}")
+        input("\nPress Enter to continue...")
+
+    def enable_fan_curve(self, gpu_id: int):
+        """Enable daemon fan control (temperature curve) for a GPU, clearing any
+        fixed speed. The caller starts the controller daemon once per batch.
+        The 'fan_target_temp' key is kept as the daemon's 'managed' marker."""
+        self.settings.pop(f'gpu_{gpu_id}_fan_speed', None)
+        self.settings[f'gpu_{gpu_id}_fan_target_temp'] = True
+        self.save_settings()
+        print(f"✓ GPU {gpu_id}: auto fan (temperature curve) enabled")
+
+    def _ensure_fan_daemon_service(self):
+        """Install (if missing/changed), enable and start the closed-loop fan
+        controller service. The daemon reads targets live, so this only needs to
+        run the unit — a rewrite triggers a restart, otherwise enable --now is a
+        no-op when it is already running."""
+        service = Path('/etc/systemd/system/nvidiacp-fan.service')
+        unit = f"""[Unit]
+Description=NVIDIA GPU target-temperature fan controller
+After=multi-user.target nvidia-persistenced.service
+Wants=nvidia-persistenced.service
+ConditionPathExists=/usr/bin/nvidia-smi
+
+[Service]
+Type=simple
+User=root
+Environment="PATH=/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin"
+ExecStart=/usr/bin/python3 {os.path.realpath(__file__)} --fan-daemon
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+"""
+        try:
+            existing = service.read_text()
+        except OSError:
+            existing = ''
+        rewrote = False
+        if existing.strip() != unit.strip():
+            if not self._sudo_tee(service, unit):
+                print("✗ Could not write the fan-controller service unit.")
+                return
+            subprocess.run(self._strip_sudo(['sudo', 'systemctl', 'daemon-reload']),
+                           check=False)
+            rewrote = True
+        subprocess.run(
+            self._strip_sudo(['sudo', 'systemctl', 'enable', '--now',
+                              'nvidiacp-fan.service']),
+            capture_output=True, text=True)
+        if rewrote:
+            subprocess.run(self._strip_sudo(['sudo', 'systemctl', 'restart',
+                                             'nvidiacp-fan.service']), check=False)
+        state = subprocess.run(
+            self._strip_sudo(['systemctl', 'is-active', 'nvidiacp-fan.service']),
+            capture_output=True, text=True).stdout.strip() or 'unknown'
+        if state == 'active':
+            print("✓ Fan controller running and enabled at boot "
+                  "(nvidiacp-fan.service).")
+        else:
+            print(f"⚠ Fan controller state: {state}  "
+                  "(check: journalctl -u nvidiacp-fan -e)")
 
     # ------------------------------------------------------------------
     # lm-sensors / fancontrol (chassis / motherboard PWM fans)
@@ -1036,6 +1130,16 @@ class NvidiaGPUController:
                         cmd = ['sudo', 'nvidia-smi', '-i', str(gpu_id), '--gom', str(value)]
                         success, _ = self.run_command(cmd, check=False)
                         if success: applied_count += 1
+                    elif setting_type == 'fan_speed':
+                        # GPU fan speed via NVML self-invoke (needs root; the
+                        # boot service already runs as root so sudo is dropped).
+                        cmd = self._nvml_fan_cmd('set', str(gpu_id), str(value))
+                        success, _ = self.run_command(cmd)
+                        if success: applied_count += 1
+                    elif setting_type == 'fan_target_temp':
+                        # Closed-loop target is driven by the always-on
+                        # nvidiacp-fan daemon, not this oneshot.
+                        total_count -= 1
                 except Exception as e:
                     print(f"Failed to apply {key}: {e}")
 
@@ -1412,7 +1516,9 @@ class NvidiaGPUController:
         gpu_id = self.select_gpu()
         if gpu_id is not None:
             try:
-                speed = int(input("Enter fan speed (0-100%): "))
+                speed = int(input(
+                    "Enter fan speed (0-100%; values below the card minimum "
+                    "are raised): "))
             except ValueError:
                 print("Invalid input")
                 self._pause()
@@ -1422,6 +1528,24 @@ class NvidiaGPUController:
             else:
                 print("Speed must be 0-100")
                 self._pause()
+
+    def action_set_fan_auto_gpu(self):
+        gpu_id = self.select_gpu()
+        if gpu_id is not None:
+            self._for_selected(gpu_id, self.set_fan_auto_gpu)
+
+    def action_enable_fan_curve(self):
+        gpu_id = self.select_gpu()
+        if gpu_id is None:
+            return
+        print("\nEnables the temperature-curve fan controller (daemon):")
+        print("  • idle (<55°C): fans off / VBIOS idle band")
+        print("  • load: 60°C→40%, 68°C→70%, 75°C→85%, 80°C→95%, 83°C→100%")
+        print("  • 85°C: forced 100% (hard safety)\n")
+        self._prime_sudo()
+        self._for_selected(gpu_id, self.enable_fan_curve)
+        self._ensure_fan_daemon_service()
+        self._pause()
 
     def action_reset_gpu(self):
         gpu_id = self.select_gpu()
@@ -1820,7 +1944,9 @@ class NvidiaGPUController:
                 ("Clear accounting data", self.action_clear_accounting),
             ]),
             ("Fan & Hardware", [
-                ("Set GPU fan speed", self.action_set_fan_speed),
+                ("Set GPU fan speed (fixed %)", self.action_set_fan_speed),
+                ("Auto fan (temperature curve)", self.action_enable_fan_curve),
+                ("Reset GPU fan to auto", self.action_set_fan_auto_gpu),
                 ("Sensors & fan control (lm-sensors)", self.fan_control_menu),
                 ("Reset GPU", self.action_reset_gpu),
             ]),
@@ -1974,7 +2100,234 @@ WantedBy=multi-user.target
         
         input("\nPress Enter to continue...")
 
+def _nvml_fan_cli(argv: List[str]) -> int:
+    """Privileged NVML fan operation, run as root via the --nvml-fan self-invoke.
+
+    argv is the tail after --nvml-fan:
+        ['set', <gpu>, <percent>]   set every fan on the GPU to <percent>
+        ['auto', <gpu>]             return the GPU's fans to automatic control
+    Imports the pynvml.py vendored next to this script — no system install."""
+    # Make the vendored pynvml importable regardless of CWD or symlink launch.
+    sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+    try:
+        import pynvml as nv
+    except ImportError as e:
+        print(f"pynvml unavailable (expected pynvml.py beside this script): {e}",
+              file=sys.stderr)
+        return 2
+    if len(argv) < 2:
+        print("usage: --nvml-fan set <gpu> <percent> | auto <gpu>", file=sys.stderr)
+        return 2
+    op = argv[0]
+    try:
+        nv.nvmlInit()
+    except nv.NVMLError as e:
+        print(f"NVML init failed: {e}", file=sys.stderr)
+        return 3
+    try:
+        gpu = int(argv[1])
+        handle = nv.nvmlDeviceGetHandleByIndex(gpu)
+        nfans = nv.nvmlDeviceGetNumFans(handle)
+        if op == 'set':
+            requested = int(argv[2])
+            try:
+                lo, hi = nv.nvmlDeviceGetMinMaxFanSpeed(handle)
+            except nv.NVMLError:
+                lo, hi = 0, 100
+            speed = max(lo, min(hi, requested))
+            for fan in range(nfans):
+                nv.nvmlDeviceSetFanSpeed_v2(handle, fan, speed)
+            note = '' if speed == requested else \
+                f' (raised from {requested}%, card range {lo}-{hi}%)'
+            print(f"GPU {gpu}: {nfans} fan(s) set to {speed}%{note}")
+        elif op == 'auto':
+            for fan in range(nfans):
+                nv.nvmlDeviceSetDefaultFanSpeed_v2(handle, fan)
+            print(f"GPU {gpu}: {nfans} fan(s) returned to automatic control")
+        else:
+            print(f"unknown op '{op}'", file=sys.stderr)
+            return 2
+        return 0
+    except nv.NVMLError as e:
+        print(f"NVML error: {e}", file=sys.stderr)
+        return 1
+    except (IndexError, ValueError) as e:
+        print(f"bad arguments: {e}", file=sys.stderr)
+        return 2
+    finally:
+        try:
+            nv.nvmlShutdown()
+        except Exception:
+            pass
+
+
+def _fan_daemon_cli(argv: List[str]) -> int:
+    """Closed-loop target-temperature fan controller (runs as root).
+
+    Holds each GPU that has a saved 'gpu_N_fan_target_temp' at that temperature
+    by nudging fan speed, with a hard-safety override near the throttle point.
+    Targets are re-read from the settings file every tick, so changes made in
+    the TUI apply without restarting the daemon. GPUs the daemon has taken over
+    are returned to automatic (VBIOS) control when it exits."""
+    import signal
+    sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+    import pynvml as nv
+
+    INTERVAL = 3.0     # seconds between control ticks
+    STEP_DOWN = 3      # %/tick max spin-down (gentle; ramp-up follows the curve)
+    HARD_MAX = 85      # °C — force 100% at/above this (core throttle is ~83°C)
+    # Temperature → fan% curve. Below IDLE_BELOW the card is handed to its VBIOS
+    # idle curve (fans off/low, and stable — unlike forcing a low manual speed,
+    # which some VBIOSes here refuse to hold). Above it, fan% follows the curve,
+    # so temps are free to climb under load before the fans do real work. Ramp-up
+    # tracks the curve directly; spin-down is rate-limited so it doesn't hunt.
+    IDLE_BELOW = 55    # °C — below this → VBIOS idle band (with hysteresis)
+    IDLE_HYST = 3      # °C — go idle at ≤IDLE_BELOW-HYST, take manual at ≥IDLE_BELOW
+    CURVE = [(60, 40), (68, 70), (75, 85), (80, 95), (83, 100)]  # (°C, fan%)
+    SETTINGS = NvidiaGPUController.SETTINGS_FILE
+
+    try:
+        nv.nvmlInit()
+    except nv.NVMLError as e:
+        print(f"[fan-daemon] NVML init failed: {e}", file=sys.stderr)
+        return 3
+
+    handles: Dict[int, Any] = {}
+    fanmin: Dict[int, int] = {}
+
+    def handle(i: int):
+        if i not in handles:
+            handles[i] = nv.nvmlDeviceGetHandleByIndex(i)
+            try:
+                lo, _ = nv.nvmlDeviceGetMinMaxFanSpeed(handles[i])
+                fanmin[i] = lo
+            except nv.NVMLError:
+                fanmin[i] = 30
+        return handles[i]
+
+    def set_fan(i: int, pct: int):
+        hd = handle(i)
+        for f in range(nv.nvmlDeviceGetNumFans(hd)):
+            nv.nvmlDeviceSetFanSpeed_v2(hd, f, pct)
+
+    def to_auto(i: int):
+        hd = handle(i)
+        for f in range(nv.nvmlDeviceGetNumFans(hd)):
+            nv.nvmlDeviceSetDefaultFanSpeed_v2(hd, f)
+
+    def read_managed():
+        """Set of GPU indices the daemon should control (marker key present)."""
+        try:
+            data = json.loads(SETTINGS.read_text())
+        except (OSError, json.JSONDecodeError):
+            return set()
+        out = set()
+        for k in data:
+            if k.startswith('gpu_') and k.endswith('_fan_target_temp'):
+                try:
+                    out.add(int(k.split('_')[1]))
+                except (ValueError, IndexError):
+                    pass
+        return out
+
+    def curve_pct(temp: int) -> int:
+        """Fan % for a temperature by linear interpolation over CURVE."""
+        if temp <= CURVE[0][0]:
+            return CURVE[0][1]
+        if temp >= CURVE[-1][0]:
+            return CURVE[-1][1]
+        for (t0, p0), (t1, p1) in zip(CURVE, CURVE[1:]):
+            if t0 <= temp <= t1:
+                return round(p0 + (p1 - p0) * (temp - t0) / (t1 - t0))
+        return CURVE[-1][1]
+
+    running = {'go': True}
+    signal.signal(signal.SIGTERM, lambda *_: running.update(go=False))
+    signal.signal(signal.SIGINT, lambda *_: running.update(go=False))
+
+    managed: Dict[int, int] = {}   # gpu -> last applied fan % (manual mode only)
+    mode: Dict[int, str] = {}      # gpu -> 'manual' | 'auto'
+    print(f"[fan-daemon] started; interval={INTERVAL}s curve={CURVE} "
+          f"idle<{IDLE_BELOW}°C spin-down≤{STEP_DOWN}%/tick "
+          f"hard-max={HARD_MAX}°C", flush=True)
+    try:
+        while running['go']:
+            managed_gpus = read_managed()
+            # A GPU that was disabled is handed back by whoever cleared it (TUI
+            # action); the daemon just stops tracking it here.
+            for i in [g for g in mode if g not in managed_gpus]:
+                mode.pop(i, None)
+                managed.pop(i, None)
+                print(f"[fan-daemon] GPU{i} disabled — releasing", flush=True)
+            for i in managed_gpus:
+                try:
+                    hd = handle(i)
+                    temp = nv.nvmlDeviceGetTemperature(hd, nv.NVML_TEMPERATURE_GPU)
+                    prev_auto = mode.get(i) == 'auto'
+
+                    # Hard safety always wins: force full cooling near throttle.
+                    if temp >= HARD_MAX:
+                        set_fan(i, 100)
+                        mode[i], managed[i] = 'manual', 100
+                        continue
+
+                    # Below the curve knee: hand to the VBIOS idle band. Two
+                    # thresholds give hysteresis so it doesn't flap at the edge.
+                    if temp <= IDLE_BELOW - IDLE_HYST:
+                        want_auto = True
+                    elif temp >= IDLE_BELOW:
+                        want_auto = False
+                    else:
+                        want_auto = prev_auto
+
+                    if want_auto:
+                        if not prev_auto:
+                            to_auto(i)
+                            print(f"[fan-daemon] GPU{i} {temp}°C <{IDLE_BELOW}°C — "
+                                  f"VBIOS idle band", flush=True)
+                        mode[i] = 'auto'
+                        managed.pop(i, None)
+                        continue
+
+                    # On the curve: follow it up immediately, ease down gently.
+                    desired = curve_pct(temp)
+                    cur = managed.get(i)
+                    if cur is None or prev_auto:
+                        cur = desired
+                    new = cur - STEP_DOWN if desired < cur - STEP_DOWN else desired
+                    new = max(fanmin.get(i, 30), min(100, new))
+                    if prev_auto or i not in managed or new != cur:
+                        set_fan(i, new)
+                        if prev_auto:
+                            print(f"[fan-daemon] GPU{i} {temp}°C — curve control "
+                                  f"at {new}%", flush=True)
+                    mode[i], managed[i] = 'manual', new
+                except nv.NVMLError as e:
+                    print(f"[fan-daemon] GPU{i} error: {e}", flush=True)
+            slept = 0.0  # nap in slices so SIGTERM is acted on promptly
+            while running['go'] and slept < INTERVAL:
+                time.sleep(0.25)
+                slept += 0.25
+    finally:
+        for i in list(mode):
+            try:
+                to_auto(i)
+            except nv.NVMLError:
+                pass
+        print("[fan-daemon] stopped; managed GPUs returned to automatic control",
+              flush=True)
+        try:
+            nv.nvmlShutdown()
+        except Exception:
+            pass
+    return 0
+
+
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == '--nvml-fan':
+        sys.exit(_nvml_fan_cli(sys.argv[2:]))
+    if len(sys.argv) > 1 and sys.argv[1] == '--fan-daemon':
+        sys.exit(_fan_daemon_cli(sys.argv[2:]))
     if len(sys.argv) > 1 and sys.argv[1] == '--apply-settings':
         # Apply settings mode (for systemd service)
         controller = NvidiaGPUController()
