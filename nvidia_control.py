@@ -140,9 +140,15 @@ def c(text: str, *styles: str) -> str:
 
 
 class NvidiaGPUController:
+    # Fixed machine-level location so the interactive user and the root boot
+    # service (systemd --apply-settings) read/write the SAME file. Previously
+    # this was Path.home()/.config which resolved to /root for the boot service
+    # -> it never found the user's settings and applied nothing on reboot.
+    SETTINGS_FILE = Path('/etc/nvidiacp/settings.json')
+
     def __init__(self):
-        self.settings_file = Path.home() / '.config' / 'nvidiacp' / 'settings.json'
-        self.settings_file.parent.mkdir(parents=True, exist_ok=True)
+        self.settings_file = self.SETTINGS_FILE
+        self._migrate_legacy_settings_file()
         self.settings = self.load_settings()
         self._migrate_settings()
         self.gpus = self.detect_gpus()
@@ -176,10 +182,75 @@ class NvidiaGPUController:
             self.save_settings()
 
     def save_settings(self):
-        """Save current settings to file"""
-        with open(self.settings_file, 'w') as f:
-            json.dump(self.settings, f, indent=2)
-    
+        """Persist settings to the shared system file via sudo tee, so the root
+        boot service and the interactive user read/write the same location.
+        _strip_sudo drops the sudo when already root (the boot service)."""
+        if not self._ensure_settings_dir():
+            return False
+        data = json.dumps(self.settings, indent=2)
+        return self._sudo_tee(self.settings_file, data)
+
+    def _sudo_tee(self, path: Path, data: str) -> bool:
+        """Write text to a root-owned file via `sudo tee` (plain tee when already
+        root). Primes sudo with a visible prompt first so the captured tee call
+        doesn't silently block waiting for a hidden password prompt."""
+        if not self._is_root() and not self._prime_sudo():
+            return False
+        try:
+            result = subprocess.run(
+                self._strip_sudo(['sudo', 'tee', str(path)]),
+                input=data, text=True, capture_output=True)
+            return result.returncode == 0
+        except Exception:
+            return False
+
+    def _ensure_settings_dir(self) -> bool:
+        """Create /etc/nvidiacp (via sudo) only when missing. Normally a no-op
+        because install.sh creates it as root, so interactive launches don't
+        trigger a sudo prompt."""
+        d = self.settings_file.parent
+        if d.exists():
+            return True
+        if not self._is_root() and not self._prime_sudo():
+            return False
+        try:
+            result = subprocess.run(
+                self._strip_sudo(['sudo', 'mkdir', '-p', str(d)]),
+                capture_output=True)
+            return result.returncode == 0
+        except Exception:
+            return False
+
+    def _legacy_settings_candidates(self) -> List[Path]:
+        """Old per-user settings locations to migrate from (pre system-path)."""
+        homes = []
+        try:
+            homes.append(Path.home())
+        except Exception:
+            pass
+        sudo_user = os.environ.get('SUDO_USER')
+        if sudo_user:
+            try:
+                homes.append(Path(os.path.expanduser(f'~{sudo_user}')))
+            except Exception:
+                pass
+        return [h / '.config' / 'nvidiacp' / 'settings.json' for h in homes]
+
+    def _migrate_legacy_settings_file(self):
+        """One-time copy of a legacy ~/.config/nvidiacp/settings.json into the
+        new system path, so existing power/clock/fan settings survive the switch.
+        Runs only when the system file doesn't exist yet."""
+        if self.settings_file.exists():
+            return
+        for legacy in self._legacy_settings_candidates():
+            try:
+                if legacy != self.settings_file and legacy.exists():
+                    if self._ensure_settings_dir():
+                        self._sudo_tee(self.settings_file, legacy.read_text())
+                    return
+            except Exception:
+                continue
+
     @staticmethod
     def _is_root() -> bool:
         return hasattr(os, 'geteuid') and os.geteuid() == 0

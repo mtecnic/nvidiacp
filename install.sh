@@ -42,22 +42,35 @@ chmod +x "$SCRIPT_DIR/nvidia_control.py"
 ln -sf "$SCRIPT_DIR/nvidia_control.py" "$INSTALL_DIR/nvidiacp"
 echo "✓ Created symlink: nvidiacp -> $SCRIPT_DIR/nvidia_control.py"
 
+# Create the shared system settings directory (read/written by both the
+# interactive app and the root boot service).
+mkdir -p /etc/nvidiacp
+echo "✓ Created settings directory: /etc/nvidiacp"
+
 # Install systemd service for persistence
 echo
 echo "Installing systemd service for boot persistence..."
 
-# Update service file with correct path
+# Hardened unit: runs as root, waits for the driver / persistence daemon, and
+# has an explicit PATH so nvidia-smi is found in the boot environment. Keep this
+# in sync with generate_systemd_service() in nvidia_control.py.
 cat > "$SERVICE_FILE" << EOF
 [Unit]
 Description=NVIDIA GPU Settings Persistence
 After=multi-user.target nvidia-persistenced.service
+Wants=nvidia-persistenced.service
+ConditionPathExists=/usr/bin/nvidia-smi
 
 [Service]
 Type=oneshot
+User=root
+Environment="PATH=/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin"
+ExecStartPre=/bin/sleep 5
 ExecStart=/usr/bin/python3 $SCRIPT_DIR/nvidia_control.py --apply-settings
 RemainAfterExit=yes
 StandardOutput=journal
 StandardError=journal
+TimeoutStartSec=60
 
 [Install]
 WantedBy=multi-user.target
