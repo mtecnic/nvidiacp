@@ -1,196 +1,196 @@
-# NVIDIA Control Panel
+# NVIDIA Control Panel (nvidiacp)
 
-A comprehensive text-based menu system for controlling NVIDIA GPU settings via nvidia-smi with automatic persistence on reboot.
+[![Python](https://img.shields.io/badge/Python-3.6%2B-blue.svg)](https://python.org)
+[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![NVIDIA](https://img.shields.io/badge/GPU-NVIDIA-orange.svg)](https://www.nvidia.com)
+
+A full-featured text menu for controlling NVIDIA GPUs on Linux — power, clocks,
+fans, ECC, MIG, compute mode — with **boot persistence**, a **closed-loop fan
+controller**, and a built-in **vLLM launch optimizer** for LLM serving.
+
+Everything runs through `nvidia-smi` + NVML (vendored, zero pip installs).
+Headless-friendly: no X server, no coolbits required.
 
 ## Features
 
-- **Complete nvidia-smi Control**: Access all major nvidia-smi commands through an intuitive text menu
-- **Settings Persistence**: Automatically save and restore GPU settings on system reboot
-- **Multi-GPU Support**: Control individual GPUs or apply settings to all GPUs simultaneously
-- **Systemd Integration**: Built-in systemd service for boot-time settings restoration
+- **Complete GPU control** — live dashboard, dmon/pmon monitors, power limits,
+  app clocks, persistence mode, GOM, auto-boost, compute mode, ECC, MIG,
+  accounting
+- **Fan control without X** — fixed % or automatic via NVML (root), clamped to
+  each card's real min/max
+- **Temperature-curve fan daemon** — closed-loop controller that holds target
+  temps, rides a tuned curve, and falls back to VBIOS idle band when cold
+- **vLLM optimizer** — multi-GPU / tensor-parallel launch plans with 5
+  workload profiles, sized to your actual VRAM
+- **Boot persistence** — settings survive reboots via systemd
+- **Multi-GPU** — per-GPU or all-GPU operations, mixed-fleet aware
+- **Zero dependencies** — pure Python 3 standard library + vendored `pynvml.py`
 
-## Supported Settings
+## Screenshot
 
-- **Persistence Mode**: Enable/disable driver persistence mode
-- **Power Management**: Set power limits (watts)
-- **Clock Speeds**: Configure memory and graphics clock speeds
-- **Compute Mode**: Set compute mode (Default/Exclusive Thread/Prohibited/Exclusive Process)
-- **Fan Control**: Adjust fan speeds (requires X11 and coolbits)
-- **ECC Memory**: Enable/disable ECC (requires reboot)
-- **Auto Boost**: Control GPU auto boost feature
-- **Reset Functions**: Reset individual or all GPU settings to defaults
+```
+╔══════════════════════════════════════════════════════════════════════╗
+║                  NVIDIA GPU CONTROL PANEL                           ║
+╠══════════════════════════════════════════════════════════════════════╣
+║        Driver 570.xx   •   CUDA 12.8   •   4× NVIDIA RTX 3090        ║
+╚══════════════════════════════════════════════════════════════════════╝
+
+  GPU  NAME                       TEMP   UTIL      POWER        MEMORY
+  ─── ────────────────────────── ───── ───── ───────────── ─────────────
+  [ 0] RTX 3090                   47°C   12%   42.3W/350.0W    5.1/24GB
+  [ 1] RTX 3090                   45°C    3%   28.1W/350.0W    1.2/24GB
+
+  INFORMATION & MONITORING
+   [ 1]  Live dashboard (auto-refresh)
+   [ 2]  GPU dashboard (full nvidia-smi)
+   [ 3]  Detailed query (per GPU)
+   [ 4]  Live monitor — clocks/power (dmon)
+   [ 5]  Live monitor — processes (pmon)
+   [ 6]  GPU capabilities table
+   [ 7]  Supported clocks (raw dump)
+
+  CLOCKS & POWER
+   [ 8]  Set power limit (validated range)
+   [ 9]  Set core + memory clocks
+  [ 10]  Reset clocks to default
+  [ 11]  Persistence mode on/off
+  [ 12]  GPU operation mode (GOM)
+  [ 13]  Auto-boost on/off
+
+  MEMORY & COMPUTE
+  [ 14]  Compute mode
+  [ 15]  ECC memory on/off
+  [ 16]  MIG mode on/off
+  [ 17]  Accounting mode on/off
+  [ 18]  Clear accounting data
+
+  FAN & HARDWARE
+  [ 19]  Set GPU fan speed (fixed %)
+  [ 20]  Auto fan (temperature curve)
+  [ 21]  Reset GPU fan to auto
+  [ 22]  Sensors & fan control (lm-sensors)
+  [ 23]  Reset GPU
+
+  PROFILES & SYSTEM
+  [ 24]  vLLM optimizer (multi-GPU / tensor-parallel)
+  [ 25]  Apply all saved settings
+  [ 26]  Show saved settings
+  [ 27]  Generate systemd service
+  [ 28]  Reset ALL GPUs to defaults
+
+   [ 0]  Exit
+
+  Select ›
+```
 
 ## Installation
 
-### Quick Install (Recommended)
-
 ```bash
+git clone https://github.com/mtecnic/nvidiacp.git
 cd nvidiacp
-sudo chmod +x install.sh
 sudo ./install.sh
 ```
 
-This will:
-- Create a system-wide `nvidiacp` command
-- Install and enable the systemd service for boot persistence
-- Set up all necessary permissions
+The installer creates the `nvidiacp` command and enables the boot-persistence
+systemd service. See [INSTALL.md](INSTALL.md) for details.
 
-### Manual Installation
+Run without installing:
 
-1. Make the script executable:
-```bash
-chmod +x nvidia_control.py
-```
-
-2. Run directly:
 ```bash
 sudo python3 nvidia_control.py
 ```
 
-3. For boot persistence, manually install the systemd service:
-```bash
-sudo cp nvidia-settings-persistence.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable nvidia-settings-persistence.service
+## Fan control
+
+### Fixed speed
+
+Menu option **Set GPU fan speed** drives every fan on the card directly via
+NVML as root — no X server or coolbits. Speeds are clamped to the card's own
+min/max (queried per card) and persisted to `/etc/nvidiacp`.
+
+### Automatic (temperature curve)
+
+Menu option **Auto fan (temperature curve)** marks a GPU for the closed-loop
+`nvidiacp-fan.service` daemon:
+
+- **Curve**: 60°C→40%, 68°C→70%, 75°C→85%, 80°C→95%, 83°C→100%
+  (linear interpolation between points)
+- **Hard safety**: ≥85°C forces 100% (core throttle starts ~83°C)
+- **Idle band**: ≤55°C (with 3°C hysteresis) hands the card back to its VBIOS
+  idle curve — quiet and stable when cold
+- **Anti-hunt**: ramp-up follows the curve immediately; spin-down is limited
+  to 3%/tick
+- **Live targets**: the daemon re-reads the settings file every 3s tick, so
+  TUI changes apply without a restart
+- **Clean exit**: SIGTERM/SIGINT returns every managed GPU to automatic
+  (VBIOS) control
+
+Check the daemon: `sudo systemctl status nvidiacp-fan` ·
+logs: `journalctl -u nvidiacp-fan -e`
+
+## vLLM optimizer
+
+Menu option **vLLM optimizer** picks GPUs and a workload profile, applies the
+matching power/clock/persistence settings, and prints a ready-to-paste launch
+plan sized to your **minimum** per-GPU VRAM (mixed fleets warned):
+
+| Profile | Power | Clocks | Mem util | Extra flags |
+|---|---|---|---|---|
+| **Maximum Throughput** | 100% | locked max | 0.95 | chunked-prefill, prefix-caching |
+| **Low Latency** | 100% | locked max | 0.90 | enforce-eager |
+| **Balanced** | 90% | default | 0.90 | — |
+| **Power Efficient** | 70% | default (boost) | 0.85 | — |
+| **Production Ready** | 90% | default | 0.90 | persistence on |
+
+Example output (2× RTX 3090, max throughput):
+
+```
+── Suggested vLLM launch ────────────────────────────────────────
+  2-way tensor parallel · ~48GB total (24GB/GPU)
+
+  CUDA_VISIBLE_DEVICES=0,1 \
+  vllm serve <MODEL> \
+    --tensor-parallel-size 2 \
+    --gpu-memory-utilization 0.95 \
+    --max-model-len 8192 \
+    --max-num-seqs 96 \
+    --enable-chunked-prefill \
+    --enable-prefix-caching
+
+  Env: export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 ```
 
-## Usage
+Context/batch heuristics scale with GPU family (A100/H100 → 32K/256,
+A6000/RTX 6000 → 16K/128, 4090/4080 → 8K/64, 3090 → 8K/48, fallback by VRAM).
+These are sensible starting points — tune to your model.
 
-### Interactive Mode
+## Persistence
 
-Run the control panel:
+Settings live in `/etc/nvidiacp/settings.json` (shared with the boot service)
+and per-user at `~/.config/nvidiacp/settings.json`.
+
 ```bash
-nvidiacp
-# or
-sudo python3 nvidia_control.py
-```
-
-Navigate through the menu using number keys to:
-1. View current GPU information
-2. Modify GPU settings
-3. Save settings for persistence
-4. Apply saved settings
-5. Reset GPUs to defaults
-
-### Command Line Mode
-
-Apply saved settings (used by systemd service):
-```bash
+# applied at boot by nvidia-settings-persistence.service
 python3 nvidia_control.py --apply-settings
+
+# daemon modes (used by systemd units)
+python3 nvidia_control.py --fan-daemon
+python3 nvidia_control.py --nvml-fan <set|auto> <gpu> [pct]
 ```
-
-## Settings Storage
-
-Settings are stored in JSON format at:
-```
-~/.config/nvidiacp/settings.json
-```
-
-Example settings file:
-```json
-{
-  "gpu_0_persistence": true,
-  "gpu_0_power_limit": 250,
-  "gpu_0_mem_clock": 5001,
-  "gpu_0_graphics_clock": 1500,
-  "gpu_0_compute_mode": 0
-}
-```
-
-## Systemd Service
-
-The systemd service automatically applies your saved settings on boot.
-
-### Service Management
-
-```bash
-# Check service status
-sudo systemctl status nvidia-settings-persistence.service
-
-# Manually trigger settings application
-sudo systemctl start nvidia-settings-persistence.service
-
-# Disable automatic application
-sudo systemctl disable nvidia-settings-persistence.service
-
-# Re-enable automatic application
-sudo systemctl enable nvidia-settings-persistence.service
-```
-
-### Service Logs
-
-View service logs:
-```bash
-journalctl -u nvidia-settings-persistence.service
-```
-
-## Uninstallation
-
-```bash
-cd nvidiacp
-sudo chmod +x uninstall.sh
-sudo ./uninstall.sh
-```
-
-This will:
-- Remove the systemd service
-- Remove the `nvidiacp` command
-- Optionally remove configuration files
 
 ## Requirements
 
-- NVIDIA GPU with NVIDIA drivers installed
-- `nvidia-smi` command available
-- Python 3.6+
-- `sudo` privileges for system settings
-- Optional: X11 with coolbits for fan control
+- NVIDIA GPU with drivers + `nvidia-smi`
+- Python 3.6+ (standard library only)
+- Root for writes (sudo)
+- `lm-sensors` optional — chassis/motherboard PWM fans
 
-## Troubleshooting
+## Uninstall
 
-### Permission Denied
-Most nvidia-smi commands require root privileges. Run with `sudo`:
 ```bash
-sudo nvidiacp
+sudo ./uninstall.sh
 ```
-
-### Fan Control Not Working
-Fan control requires:
-1. X11 display server running
-2. Coolbits enabled in X11 configuration
-3. nvidia-settings package installed
-
-### Settings Not Persisting
-1. Check systemd service status:
-```bash
-sudo systemctl status nvidia-settings-persistence.service
-```
-
-2. Verify settings file exists:
-```bash
-ls -la ~/.config/nvidiacp/settings.json
-```
-
-3. Check service logs for errors:
-```bash
-journalctl -u nvidia-settings-persistence.service -n 50
-```
-
-### ECC Memory Changes
-ECC memory changes require a system reboot to take effect.
-
-## Security Notes
-
-- The application requires sudo privileges to modify GPU settings
-- Settings are stored in user's home directory with standard permissions
-- Systemd service runs as root to apply settings at boot
 
 ## License
 
-This tool is provided as-is for system administration purposes.
-
-## Support
-
-For issues or questions:
-1. Check nvidia-smi documentation: `man nvidia-smi`
-2. Verify NVIDIA driver installation: `nvidia-smi`
-3. Check system logs: `dmesg | grep -i nvidia`
+MIT — see [LICENSE](LICENSE).
