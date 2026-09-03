@@ -27,3 +27,12 @@ Thumbs.db
 
 # User settings
 settings.json
+
+# AI agent / dev tooling
+CLAUDE.md
+AGENTS.md
+.claude/
+.hermes/
+.cursor/
+.gro/
+.trae/
