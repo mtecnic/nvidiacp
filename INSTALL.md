@@ -4,7 +4,7 @@
 
 ```bash
 # 1. Go to the nvidiacp folder
-cd /home/waive/nvidiacp
+cd ~/nvidiacp
 
 # 2. Run the installer (requires sudo)
 sudo ./install.sh
@@ -23,11 +23,11 @@ If you prefer not to use the installer:
 
 ```bash
 # 1. Make scripts executable
-chmod +x /home/waive/nvidiacp/nvidia_control.py
-chmod +x /home/waive/nvidiacp/vllm_optimizer.py
+chmod +x ~/nvidiacp/nvidia_control.py
+chmod +x ~/nvidiacp/vllm_optimizer.py
 
 # 2. Run directly
-sudo python3 /home/waive/nvidiacp/nvidia_control.py
+sudo python3 ~/nvidiacp/nvidia_control.py
 ```
 
 ---
@@ -38,17 +38,17 @@ sudo python3 /home/waive/nvidiacp/nvidia_control.py
 ```bash
 sudo nvidiacp
 # or
-sudo python3 /home/waive/nvidiacp/nvidia_control.py
+sudo python3 ~/nvidiacp/nvidia_control.py
 ```
 
 ### vLLM Optimizer (Standalone)
 ```bash
-sudo python3 /home/waive/nvidiacp/vllm_optimizer.py
+sudo python3 ~/nvidiacp/vllm_optimizer.py
 ```
 
 ### Apply Saved Settings (Used by boot service)
 ```bash
-python3 /home/waive/nvidiacp/nvidia_control.py --apply-settings
+python3 ~/nvidiacp/nvidia_control.py --apply-settings
 ```
 
 ---
@@ -177,7 +177,7 @@ sudo systemctl enable nvidia-settings-persistence.service
 ## Uninstallation
 
 ```bash
-cd /home/waive/nvidiacp
+cd ~/nvidiacp
 sudo ./uninstall.sh
 ```
 
@@ -215,7 +215,7 @@ sudo systemctl status nvidia-settings-persistence.service
 ### vLLM Optimizer Not Found
 Make sure you're in the right directory:
 ```bash
-ls -la /home/waive/nvidiacp/vllm_optimizer.py
+ls -la ~/nvidiacp/vllm_optimizer.py
 ```
 
 ### Fan Control Not Working
@@ -226,10 +226,10 @@ Fan control requires X11 and coolbits configuration. This is optional and mainly
 ## File Locations
 
 ### Program Files:
-- `/home/waive/nvidiacp/nvidia_control.py` - Main application
-- `/home/waive/nvidiacp/vllm_optimizer.py` - vLLM optimizer  
-- `/home/waive/nvidiacp/install.sh` - Installer
-- `/home/waive/nvidiacp/uninstall.sh` - Uninstaller
+- `~/nvidiacp/nvidia_control.py` - Main application
+- `~/nvidiacp/vllm_optimizer.py` - vLLM optimizer  
+- `~/nvidiacp/install.sh` - Installer
+- `~/nvidiacp/uninstall.sh` - Uninstaller
 
 ### Configuration:
 - `~/.config/nvidiacp/settings.json` - Your saved GPU settings
